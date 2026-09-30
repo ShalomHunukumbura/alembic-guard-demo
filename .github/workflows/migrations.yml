@@ -1,0 +1,50 @@
+name: Migrations
+
+on:
+  pull_request:
+
+jobs:
+  # Static check: reads the migration and annotates risky lines on the PR diff.
+  alembic-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # alembic-guard only checks migrations this PR changes
+      - uses: ShalomHunukumbura/alembic-guard@v0
+
+  # Proof: run the PR's migrations against a database with production-sized data.
+  migrate-with-data:
+    name: Run migrations on production-sized data
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: shop
+          POSTGRES_PASSWORD: shop
+          POSTGRES_DB: shop
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U shop" --health-interval 2s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://shop:shop@localhost:5432/shop
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+
+      - name: Migrate to the base branch and seed it like production
+        run: |
+          git checkout -q "$BASE_SHA"
+          uv run alembic upgrade head
+          uv run python -m scripts.seed
+
+      - name: Apply this PR's migrations
+        run: |
+          git checkout -q "$HEAD_SHA"
+          uv run alembic upgrade head
